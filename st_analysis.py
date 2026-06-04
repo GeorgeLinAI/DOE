@@ -14,11 +14,13 @@ import scipy.optimize as opt
 from scipy import stats as sp_stats
 import re
 from itertools import combinations, product as iterproduct
+import io
 
 
 @st.cache_data
 def fit_ols(formula, data_json):
-    data = pd.read_json(data_json)
+    # 使用 io.StringIO 包裝以避免 Windows 平台因中文或長字串誤判為檔案路徑
+    data = pd.read_json(io.StringIO(data_json))
     return smf.ols(formula=formula, data=data).fit()
 
 
@@ -80,6 +82,11 @@ st.markdown("上傳數據、篩選顯著因子、驗證模型健康度，並自�
 # 初始化 session state 來記憶最佳化參數
 if 'opt_params' not in st.session_state:
     st.session_state.opt_params = {}
+if "show_success_toast" not in st.session_state:
+    st.session_state.show_success_toast = False
+# 🌟 初始化計算狀態鎖
+if "has_optimized_results" not in st.session_state:
+    st.session_state.has_optimized_results = False
 
 # ==========================================
 # 步驟 1：檔案上傳與資料清理
@@ -202,7 +209,8 @@ if uploaded_file is not None:
             # 顯示於 st.info
             st.info(f"**最終最佳化公式**:     \n\n`{full_equation_text}`")
 
-            st.text(model.summary())
+            #st.text(model.summary())
+            st.code(str(model.summary()), language="text")
             st.divider()
 
             # ==========================================
@@ -378,31 +386,64 @@ if uploaded_file is not None:
                     # 合併數值與類別最佳解
                     opt_params_combined = {**best_opt_cats,
                                            **dict(zip(numeric_x, best_opt_x if best_opt_x is not None else []))}
+
+                    # 防止 rerun 之後消失
                     st.session_state.opt_params = opt_params_combined
+                    st.session_state.has_optimized_results = True
+                    st.session_state.show_success_toast = True
 
                     final_pred_df = pd.DataFrame([opt_params_combined])
                     opt_y = model.predict(final_pred_df)[0]
 
-                    col_res1, col_res2 = st.columns([1, 2])
-                    with col_res1:
-                        st.metric(label=f"最佳化預測結果 ({y_col})", value=f"{opt_y:.4f}")
-                    with col_res2:
-                        display_vals = [
-                            f"{opt_params_combined[c]:.3f}"
-                            if isinstance(opt_params_combined[c], (int, float))
-                            else str(opt_params_combined[c])
-                            for c in x_cols
-                        ]
-                        col_types = ["類別" if c in categ_x else "數值" for c in x_cols]
-                        opt_df = pd.DataFrame({
-                            "因子": x_cols,
-                            "型別": col_types,
-                            "最佳設定值": display_vals
-                        }).set_index("因子")
-                        st.dataframe(opt_df, use_container_width=True)
+                    # 直接把最佳化結果，塞進輸入框要用的 key 裡面！
+                    for col, best_val in opt_params_combined.items():
+                        if col in categ_x:
+                            st.session_state[f"select_{col}"] = best_val
+                        else:
+                            st.session_state[f"slider_{col}"] = float(best_val)
+
+                    # 強制引發 Rerun，確保 Chrome 不失效
+                    st.rerun()
+
                 else:
                     st.error("⚠️ 演算法無法收斂，請檢查資料或放寬條件。")
-            
+
+            # 只要算過一次，Grid 就不會因為 Rerun 而消失
+            if st.session_state.has_optimized_results:
+    
+                # 成功提示控制
+                if st.session_state.show_success_toast:
+                    st.success("🎉 運算完成！已自動將最佳參數帶入下方的模擬器中。")
+                    st.session_state.show_success_toast = False
+
+                # 重新預測
+                current_opt_params = st.session_state.opt_params
+                final_pred_df = pd.DataFrame([current_opt_params])
+                opt_y = model.predict(final_pred_df)[0]
+
+                # 重新預測
+                st.write("### 🎯 最佳化成果綜合看板")
+                col_res1, col_res2 = st.columns([1, 2])
+    
+                with col_res1:
+                    st.metric(label=f"最佳化預測結果 ({y_col})", value=f"{opt_y:.4f}")
+        
+                with col_res2:
+                    display_vals = [
+                        f"{current_opt_params[c]:.3f}"
+                        if isinstance(current_opt_params[c], (int, float))
+                        else str(current_opt_params[c])
+                        for c in x_cols
+                    ]
+                    col_types = ["類別" if c in categ_x else "數值" for c in x_cols]
+                    opt_df = pd.DataFrame({
+                        "因子": x_cols,
+                        "型別": col_types,
+                        "最佳設定值": display_vals
+                    }).set_index("因子")
+        
+                    st.dataframe(opt_df, use_container_width=True)            
+
             st.divider()
 
             # ==========================================
@@ -414,31 +455,53 @@ if uploaded_file is not None:
             MAX_COLS_PER_ROW = 5  # 每行最多顯示 4 個因子，防止 UI 擠壓
             user_inputs = {}
             col_chunks = [x_cols[i:i + MAX_COLS_PER_ROW] for i in range(0, len(x_cols), MAX_COLS_PER_ROW)]
+
             for chunk in col_chunks:
                 input_cols = st.columns(len(chunk))
                 for j, col in enumerate(chunk):
                     with input_cols[j]:
+            
                         if col in categ_x:
-                            # 類別因子：使用 selectbox
+
                             options = sorted(df[col].unique().tolist(), key=str)
-                            saved = st.session_state.opt_params.get(col, options[0])
-                            default_idx = options.index(saved) if saved in options else 0
+                
+                            # 第一次開網頁，初始化這個 key 為第一個選項
+                            if f"select_{col}" not in st.session_state:
+                                st.session_state[f"select_{col}"] = options[0]
+                
+                            # 使用 key 自動雙向綁定
                             user_inputs[col] = st.selectbox(
-                                col, options, index=default_idx, key=f"select_{col}"
+                                label=col,
+                                options=options,
+                                key=f"select_{col}"
                             )
+                
                         else:
-                            # 數值因子：使用 slider
+
                             span = df[col].max() - df[col].min()
                             min_val = float(df[col].min() - span * 0.3)
                             max_val = float(df[col].max() + span * 0.3)
-                            if col in st.session_state.opt_params:
-                                default_val = float(st.session_state.opt_params[col])
-                            else:
-                                default_val = float(df[col].mean())
+                
+                            # 第一次開網頁，初始化這個 key 為平均值
+                            if f"slider_{col}" not in st.session_state:
+                                st.session_state[f"slider_{col}"] = float(df[col].mean())
+                
+                            # 如有最佳值 Slider 的 min/max 範圍，進行安全限制
+                            current_slider_val = st.session_state[f"slider_{col}"]
+                            if current_slider_val < min_val:
+                                st.session_state[f"slider_{col}"] = min_val
+                            elif current_slider_val > max_val:
+                                st.session_state[f"slider_{col}"] = max_val
+
+                            # 直接去讀取在 session_state 中的值
                             user_inputs[col] = st.slider(
-                                col, min_val, max_val, default_val,
-                                step=(max_val - min_val) / 100, key=f"slider_{col}"
+                                label=col,
+                                min_value=min_val,
+                                max_value=max_val,
+                                step=(max_val - min_val) / 100,
+                                key=f"slider_{col}"
                             )
+
 
             pred_df = pd.DataFrame([user_inputs])
             predicted_y = model.predict(pred_df)[0]
