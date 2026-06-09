@@ -195,19 +195,21 @@ def check_factor(n_factors, factor_configs):
             f_names.append(factor['Name'])
     
         if factor['Min'] > factor['Max']:
+            # 大小值設定反了，自動對調
             error_messages += '因子名稱 ' + factor['Name'] + '的大小值設定反了哦!, 我幫你改回來\n\n'
             f_mins.append(factor['Max'])
             f_maxs.append(factor['Min'])
             n_error += 1
-        else:
-            f_mins.append(factor['Min'])
-            f_maxs.append(factor['Max'])
-    
-        if factor['Min'] == factor['Max']:
+        elif factor['Min'] == factor['Max']:
+            # 大小值相同，自動在大值加 1（原本獨立的 if 改成 elif，避免重複 append）
             error_messages += '因子名稱 ' + factor['Name'] + '的大小值設定一樣也是不行的哦!, 我幫你在大值加 1 \n\n'
             f_mins.append(factor['Min'])
             f_maxs.append(factor['Max'] + 1)
             n_error += 1
+        else:
+            # 正常情況
+            f_mins.append(factor['Min'])
+            f_maxs.append(factor['Max'])
             
     if n_error != 0:
         error_messages += '總共有 '+ str(n_error) + ' 個錯誤，建議重新設定看看\n\n'
